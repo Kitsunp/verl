@@ -266,6 +266,10 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
+        if "logits" in data.batch:
+            adv_kwargs["logits"] = data.batch["logits"]
+        elif "actor_logits" in data.batch:  # Fallback name
+            adv_kwargs["logits"] = data.batch["actor_logits"]
 
         # calculate advantage estimator
         advantages, returns = adv_estimator_fn(**adv_kwargs)
