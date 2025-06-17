@@ -750,3 +750,61 @@ def compute_pf_ppo_reweight_data(
     resampled_data.meta_info = resampled_meta_info
 
     return resampled_data
+def compute_token_entropy(logits: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
+    """
+    Compute token-level entropy from logits.
+    
+    Args:
+        logits: (batch_size, seq_len, vocab_size)
+        temperature: Temperature for softmax
+        
+    Returns:
+        entropy: (batch_size, seq_len)
+    """
+    probs = torch.softmax(logits / temperature, dim=-1)
+    entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)
+    return entropy
+@register_adv_est("rlvr_forking_weighted")
+def compute_rlvr_forking_weighted_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor, 
+    config=None,
+    **kwargs
+):
+    """
+    Implementa RLVR PSR/NSR + Forking Tokens filtering.
+    """
+    if config is None:
+        config = {}
+        
+    # Paper 2: Forking tokens filtering
+    forking_mask = torch.ones_like(token_level_rewards)
+    if "logits" in kwargs:
+        logits = kwargs["logits"]
+        token_entropies = compute_token_entropy(logits)
+        entropy_percentile = config.get("entropy_percentile", 0.8)
+        
+        # ✅ FIX: Global threshold across batch
+        entropy_threshold = torch.quantile(token_entropies.flatten(), entropy_percentile)
+        forking_mask = (token_entropies >= entropy_threshold).float()
+    
+    # Paper 1: PSR/NSR decomposition 
+    positive_mask = (token_level_rewards > 0).float()
+    negative_mask = (token_level_rewards < 0).float()
+    
+    # Apply forking filter
+    positive_mask = positive_mask * forking_mask * response_mask
+    negative_mask = negative_mask * forking_mask * response_mask
+    
+    # ✅ FIX: PSR/NSR with actual reward scaling
+    psr_advantages = positive_mask * token_level_rewards
+    nsr_advantages = negative_mask * (-token_level_rewards)  # Flip sign for NSR
+    
+    # Weighted-REINFORCE combination (Equation 9)
+    lambda_psr = config.get("lambda_psr", 0.1)
+    advantages = lambda_psr * psr_advantages + nsr_advantages
+    
+    # ✅ FIX: Proper returns computation
+    returns = token_level_rewards * forking_mask * response_mask
+    
+    return advantages, returns
